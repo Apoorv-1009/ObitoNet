@@ -36,6 +36,7 @@ model : {
     decoder_depth: 4,
     decoder_num_heads: 6,
     patch_size: 28,
+    image_dim: 224,
     vit_model_name: 'google/vit-base-patch16-224-in21k'
   },
   }

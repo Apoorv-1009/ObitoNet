@@ -626,9 +626,11 @@ class ObitoNetImg(nn.Module):
     def __init__(self, config):
         super().__init__()
 
+        self.patch_size = int(((config.transformer_config.image_dim)**2 / config.num_group)**0.5)
+        print("Patch Size: ", self.patch_size)
         # Load ViT model configuration
         self.configuration = ViTConfig(hidden_size=config.transformer_config.trans_dim,
-                                       patch_size=config.transformer_config.patch_size
+                                       patch_size=self.patch_size,
                                        )
 
         # Load the image_processor
@@ -638,6 +640,40 @@ class ObitoNetImg(nn.Module):
 
         # Load the ViT model
         self.vit_model = ViTModel(config=self.configuration)
+
+
+    def load_model_from_ckpt(self, ckpt_path):
+        """
+        Loads pretrained weights into the Point_MAE model for continued training.
+
+        Args:
+            ckpt_path (str): Path to the checkpoint file.
+
+        Raises:
+            FileNotFoundError: If the checkpoint file is not found.
+        """
+        if ckpt_path is not None:
+            print_log(f"Loading checkpoint from {ckpt_path}...", logger="Point_MAE")
+            try:
+                ckpt = torch.load(ckpt_path, map_location="cpu")  # Load checkpoint
+                state_dict = ckpt['model'] if 'model' in ckpt else ckpt
+
+                # Load state_dict into the model
+                incompatible = self.load_state_dict(state_dict, strict=False)
+
+                # Log missing and unexpected keys
+                if incompatible.missing_keys:
+                    print_log(f"Missing keys: {get_missing_parameters_message(incompatible.missing_keys)}", logger="Point_MAE")
+                if incompatible.unexpected_keys:
+                    print_log(f"Unexpected keys: {get_unexpected_parameters_message(incompatible.unexpected_keys)}", logger="Point_MAE")
+
+                print_log(f"Checkpoint successfully loaded from {ckpt_path}", logger="Point_MAE")
+            except FileNotFoundError:
+                print_log(f"Checkpoint file not found: {ckpt_path}", logger="Point_MAE")
+                raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
+        else:
+            print_log("No checkpoint path provided. Training from scratch.", logger="Point_MAE")
+            self.apply(self._init_weights)  # Initialize weights if no checkpoint is provided
     
     def forward(self, img):
         
