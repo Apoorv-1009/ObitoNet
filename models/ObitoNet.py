@@ -460,7 +460,7 @@ class ObitoNet_CA(nn.Module):
         self.cross_attn = CrossAttention(dim=self.trans_dim)
 
         #MAE Decoder
-        self.decoder_depth = config.transformer_config.decoder_depth
+        stokenself.decoder_depth = config.transformer_config.decoder_depth
         self.drop_path_rate = config.transformer_config.drop_path_rate
         self.decoder_num_heads = config.transformer_config.decoder_num_heads
         dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate, self.decoder_depth)]
