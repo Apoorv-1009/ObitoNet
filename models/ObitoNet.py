@@ -408,7 +408,7 @@ class CrossAttention(nn.Module):
         self.proj = nn.Linear(dim, dim) # This is the learnable weight matrix W'
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, y):
+    def forward(self, x, y, vis = False):
         """
         Args:
             x: torch.Tensor: (B, N, C)
@@ -450,10 +450,16 @@ class CrossAttention(nn.Module):
         # Attention matrix computation
         attn = (q @ k.transpose(-2, -1)) * self.scale # QK^T / sqrt(d_k)
         attn = attn.softmax(dim=-1) # Softmax(QK^T / sqrt(d_k))
-        x_attn = (attn @ v).transpose(1, 2).reshape(B, N, C) # Softmax(QK^T / sqrt(d_k)) * V
-        x_attn = self.proj(x_attn) # Learnable transformation
+        attn_drop = self.attn_drop(attn) # Dropout
 
-        return x_attn
+        x_attn = (attn_drop @ v).transpose(1, 2).reshape(B, N, C) # Softmax(QK^T / sqrt(d_k)) * V
+        x_attn = self.proj(x_attn) # Learnable transformation
+        x_attn = self.attn_drop(x_attn)
+
+        if vis:
+            return x_attn, attn
+        else:
+            return x_attn
 
 class ObitoNetCA(nn.Module):
     def __init__(self, config):
@@ -474,16 +480,22 @@ class ObitoNetCA(nn.Module):
             drop_path_rate=dpr,
             num_heads=self.decoder_num_heads,
         )
+        self.group_size = config.group_size
 
         #Reconstruction head
-        self.group_size = config.group_size
+        # self.increase_dim = nn.Sequential(
+        #     # nn.Conv1d(self.trans_dim, 1024, 1),
+        #     # nn.BatchNorm1d(1024),
+        #     # nn.LeakyReLU(negative_slope=0.2),
+        #     nn.Conv1d(self.trans_dim, 45*self.group_size, 1)
+        # )
+
         self.increase_dim = nn.Sequential(
-            # nn.Conv1d(self.trans_dim, 1024, 1),
-            # nn.BatchNorm1d(1024),
-            # nn.LeakyReLU(negative_slope=0.2),
-            nn.Conv1d(self.trans_dim, 45*self.group_size, 1)
-        )
-    
+            nn.Conv1d(self.trans_dim, 512, 1),  # Hidden layer
+            nn.ReLU(inplace=True),  # Nonlinearity
+            nn.Conv1d(512, 3 * self.group_size, 1)  # Output layer
+        ) 
+
     def load_model_from_ckpt(self, ckpt_path):
         """
         Loads pretrained weights into the Point_MAE model for continued training.
@@ -517,17 +529,27 @@ class ObitoNetCA(nn.Module):
             print_log("No checkpoint path provided. Training from scratch.", logger="Point_MAE")
             self.apply(self._init_weights)  # Initialize weights if no checkpoint is provided
 
-    def forward(self, pc_tokens, N, img_tokens, **kwargs):
+    def forward(self, pc_tokens, N, img_tokens, vis = False, **kwargs):
         # Apply Cross Attention to pointcloud and image tokens
-        tokens = self.cross_attn(pc_tokens, img_tokens)
+        if vis:
+            tokens, attn = self.cross_attn(pc_tokens, img_tokens, vis)
+            # Pass all embeddings through Masked Decoder
+            tokens_recreated = self.MAE_decoder(tokens, N)
 
-        # Pass all embeddings through Masked Decoder
-        tokens_recreated = self.MAE_decoder(tokens, N)
+            # Pass through reconstruction head
+            B, M, C = tokens_recreated.shape
+            pts_reconstructed = self.increase_dim(tokens_recreated.transpose(1, 2)).transpose(1, 2).reshape(B * M, -1, 3)  # B M 1024
+            return pts_reconstructed, B, M, attn
+        else:
+            tokens = self.cross_attn(pc_tokens, img_tokens, vis)
+            # Pass all embeddings through Masked Decoder
+            tokens_recreated = self.MAE_decoder(tokens, N)
 
-        # Pass through reconstruction head
-        B, M, C = tokens_recreated.shape
-        pts_reconstructed = self.increase_dim(tokens_recreated.transpose(1, 2)).transpose(1, 2).reshape(B * M, -1, 3)  # B M 1024
-        return pts_reconstructed, B, M 
+            # Pass through reconstruction head
+            B, M, C = tokens_recreated.shape
+            pts_reconstructed = self.increase_dim(tokens_recreated.transpose(1, 2)).transpose(1, 2).reshape(B * M, -1, 3)  # B M 1024
+            
+            return pts_reconstructed, B, M
 
 class ObitoNetPC(nn.Module):
     def __init__(self, config):
@@ -626,8 +648,10 @@ class ObitoNetImg(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.patch_size = int(((config.transformer_config.image_dim)**2 / config.num_group)**0.5)
-        print("Patch Size: ", self.patch_size)
+        # self.patch_size = int(((config.transformer_config.image_dim)**2 / config.num_group)**0.5)
+        # print("Patch Size: ", self.patch_size)
+        self.patch_size = config.transformer_config.patch_size
+
         # Load ViT model configuration
         self.configuration = ViTConfig(hidden_size=config.transformer_config.trans_dim,
                                        patch_size=self.patch_size,
@@ -640,40 +664,6 @@ class ObitoNetImg(nn.Module):
 
         # Load the ViT model
         self.vit_model = ViTModel(config=self.configuration)
-
-
-    def load_model_from_ckpt(self, ckpt_path):
-        """
-        Loads pretrained weights into the Point_MAE model for continued training.
-
-        Args:
-            ckpt_path (str): Path to the checkpoint file.
-
-        Raises:
-            FileNotFoundError: If the checkpoint file is not found.
-        """
-        if ckpt_path is not None:
-            print_log(f"Loading checkpoint from {ckpt_path}...", logger="Point_MAE")
-            try:
-                ckpt = torch.load(ckpt_path, map_location="cpu")  # Load checkpoint
-                state_dict = ckpt['model'] if 'model' in ckpt else ckpt
-
-                # Load state_dict into the model
-                incompatible = self.load_state_dict(state_dict, strict=False)
-
-                # Log missing and unexpected keys
-                if incompatible.missing_keys:
-                    print_log(f"Missing keys: {get_missing_parameters_message(incompatible.missing_keys)}", logger="Point_MAE")
-                if incompatible.unexpected_keys:
-                    print_log(f"Unexpected keys: {get_unexpected_parameters_message(incompatible.unexpected_keys)}", logger="Point_MAE")
-
-                print_log(f"Checkpoint successfully loaded from {ckpt_path}", logger="Point_MAE")
-            except FileNotFoundError:
-                print_log(f"Checkpoint file not found: {ckpt_path}", logger="Point_MAE")
-                raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
-        else:
-            print_log("No checkpoint path provided. Training from scratch.", logger="Point_MAE")
-            self.apply(self._init_weights)  # Initialize weights if no checkpoint is provided
     
     def forward(self, img):
         
@@ -779,24 +769,29 @@ class ObitoNet(nn.Module):
         # Extract encoded img tokens from the ObitoNet Image Arm
         img_tokens = self.obitonet_img(img)
 
-        pts_reconstructed, B, M = self.obitonet_ca(pc_tokens, N, img_tokens)
-
-        # Extract ground truth points
-        gt_points = neighborhood[mask].reshape(B*M,-1,3)
-        loss1 = self.loss_func(pts_reconstructed, gt_points)
 
         if vis: #visualization
+            pts_reconstructed, B, M, attn = self.obitonet_ca(pc_tokens, N, img_tokens, vis)
+
+            # Extract ground truth points
+            gt_points = neighborhood[mask].reshape(B*M,-1,3)
+            loss1 = self.loss_func(pts_reconstructed, gt_points)
             vis_points = neighborhood[~mask].reshape(B * (self.num_groups - M), -1, 3)
             full_vis = vis_points + center[~mask].unsqueeze(1)
             full_rebuild = pts_reconstructed + center[mask].unsqueeze(1)
-            full = torch.cat([full_vis, full_rebuild], dim=0)
+            full_viz = full_vis.repeat(1,full_rebuild.shape[1] // full_vis.shape[1],1)
+            full = torch.cat([full_viz, full_rebuild], dim=0)
             # full_points = torch.cat([rebuild_points,vis_points], dim=0)
             full_center = torch.cat([center[mask], center[~mask]], dim=0)
             # full = full_points + full_center.unsqueeze(1)
             ret2 = full_vis.reshape(-1, 3).unsqueeze(0)
             ret1 = full.reshape(-1, 3).unsqueeze(0)
             # return ret1, ret2
-            return ret1, ret2, full_center
+            return ret1, ret2, full_center, attn
         else:
+            pts_reconstructed, B, M = self.obitonet_ca(pc_tokens, N, img_tokens, vis)
+            # Extract ground truth points
+            gt_points = neighborhood[mask].reshape(B*M,-1,3)
+            loss1 = self.loss_func(pts_reconstructed, gt_points)
             return loss1
         

@@ -7,6 +7,7 @@ from utils import misc, dist_utils
 import time
 from utils.logging import *
 from models.ObitoNet import ObitoNet
+import matplotlib.pyplot as plt
 
 import cv2
 import numpy as np
@@ -43,6 +44,25 @@ def test_net(args, config):
 
     test(obitonet, test_dataloader, args, config, logger=logger)
 
+def save_attention_heatmap(attention_matrix, save_path):
+    """
+    Save the attention matrix as a heatmap.
+    Args:
+        attention_matrix (np.array): Attention weights (B, num_heads, N, M).
+        save_path (str): Path to save the heatmap.
+    """
+    # Average over heads if needed
+    avg_attention = attention_matrix.mean(axis=1)  # Shape: (B, N, M)
+    
+    # Visualize the first example
+    plt.figure(figsize=(10, 8))
+    plt.imshow(avg_attention[0], cmap='viridis')
+    plt.colorbar()
+    plt.title("Cross Attention Weights")
+    plt.xlabel("Keys (from y)")
+    plt.ylabel("Queries (from x)")
+    plt.savefig(save_path)
+    plt.close()
 
 # visualization
 def test(obitonet, test_dataloader, args, config, logger = None):
@@ -91,7 +111,8 @@ def test(obitonet, test_dataloader, args, config, logger = None):
             #     raise NotImplementedError(f'Train phase do not support {dataset_name}')
 
             # dense_points, vis_points = base_model(points, vis=True)
-            dense_points, vis_points, centers= obitonet(points, img, vis=True)
+            dense_points, vis_points, centers, attention_matrix = obitonet(points, img, vis=True)
+
             final_image = []
             data_path = f'./vis/'
             if not os.path.exists(data_path):
@@ -121,6 +142,10 @@ def test(obitonet, test_dataloader, args, config, logger = None):
             img = np.concatenate(final_image, axis=1)
             img_path = os.path.join(data_path, f'plot_{idx:04d}.jpg')
             cv2.imwrite(img_path, img)
+            save_attention_heatmap(
+                attention_matrix.cpu().numpy(),
+                os.path.join(data_path, f'attention_{idx:04d}.png')
+            )
 
             if idx > 1500:
                 break

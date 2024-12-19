@@ -11,7 +11,7 @@ module add cuda/11.8.0
 module add gcc/11.2.0
 
 # Run the main script with the specified configuration
-python visualization.py --test --config configs/config.yaml --exp_name nexustest
+python visualization.py --test --config configs/config.yaml --exp_name vitmae
 
 # Print success message
 echo "ran successfully"
